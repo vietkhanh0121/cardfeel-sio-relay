@@ -1,70 +1,40 @@
+// server.js — Socket.IO relay (Render)
 const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
-const cors = require('cors');
-
-const PORT = process.env.PORT || 3000;
-const ORIGINS = (process.env.CORS_ORIGINS || '*')
-  .split(',').map(s => s.trim()).filter(Boolean);
 
 const app = express();
-app.use(cors({ origin: ORIGINS.length===1 && ORIGINS[0]==='*' ? '*' : ORIGINS, credentials: true }));
-app.get('/', (_, res) => res.send('Socket.IO P2P Relay OK'));
-
 const server = http.createServer(app);
 const io = new Server(server, {
-  cors: { origin: ORIGINS.length===1 && ORIGINS[0]==='*' ? '*' : ORIGINS, methods: ['GET','POST'] },
   path: '/socket.io',
-  pingInterval: 25000,
-  pingTimeout: 60000,
+  cors: { origin: '*', methods: ['GET','POST'] },
+  serveClient: true
 });
 
-const nsp = io.of('/p2p');
-const roomsMeta = new Map();
+// Health route
+app.get('/', (req,res)=> res.send('Socket.IO relay is alive'));
 
-nsp.on('connection', (socket) => {
-  socket.on('join', ({ room, role }) => {
-    if (!room) return;
-    socket.data.role = role || 'guest';
-    socket.join(room);
-
-    let meta = roomsMeta.get(room);
-    if (!meta) meta = { createdAt: Date.now(), members: new Set() };
-    meta.members.add(socket.id);
-    roomsMeta.set(room, meta);
-
-    const count = nsp.adapter.rooms.get(room)?.size || 0;
-    nsp.to(room).emit('room_info', { room, count });
-    socket.emit('joined', { room, you: socket.id, role: socket.data.role });
+io.on('connection', (socket)=>{
+  // client gọi join-room
+  socket.on('join-room', ({ room, role }, ack)=>{
+    if (room) socket.join(room);
+    // báo cho cả phòng là đã có người vào
+    io.to(room).emit('room-joined', { room, who: role || 'guest' });
+    if (typeof ack === 'function') ack({ ok: true });
   });
 
-  socket.on('msg', (msg) => {
-    const room = msg?.room;
+  // guest intent -> relay cho host (và cả phòng cho đơn giản)
+  socket.on('client-message', ({ room, type, payload })=>{
     if (!room) return;
-    socket.to(room).emit('msg', msg);
+    io.to(room).emit('client-message', { room, type, payload });
   });
 
-  socket.on('leave', ({ room }) => {
+  // host broadcast state authoritative
+  socket.on('host-broadcast', ({ room, state })=>{
     if (!room) return;
-    socket.leave(room);
-    const meta = roomsMeta.get(room);
-    if (meta) {
-      meta.members.delete(socket.id);
-      if (meta.members.size === 0) roomsMeta.delete(room);
-    }
-  });
-
-  socket.on('disconnect', () => {
-    for (const [room, meta] of roomsMeta) {
-      if (meta.members.has(socket.id)) {
-        meta.members.delete(socket.id);
-        if (meta.members.size === 0) roomsMeta.delete(room);
-        nsp.to(room).emit('room_info', { room, count: meta.members.size });
-      }
-    }
+    io.to(room).emit('host-broadcast', { room, state });
   });
 });
 
-server.listen(PORT, () => {
-  console.log('Socket.IO relay listening on', PORT);
-});
+const PORT = process.env.PORT || 3000;
+server.listen(PORT, ()=> console.log('Socket.IO relay listening on', PORT));
