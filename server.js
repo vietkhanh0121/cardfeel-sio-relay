@@ -1,40 +1,51 @@
-// server.js — Socket.IO relay (Render)
-const express = require('express');
-const http = require('http');
-const { Server } = require('socket.io');
+import express from "express";
+import cors from "cors";
+import { createServer } from "http";
+import { ExpressPeerServer } from "peer";
+
+const PORT = process.env.PORT || 9000;
+const PEER_PATH = process.env.PEER_PATH || "/pg"; // bạn có thể đổi
 
 const app = express();
-const server = http.createServer(app);
-const io = new Server(server, {
-  path: '/socket.io',
-  cors: { origin: '*', methods: ['GET','POST'] },
-  serveClient: true
+
+// CORS: cho phép local dev + domain của bạn
+app.use(cors({
+  origin: [
+    "http://localhost:5173",
+    "http://localhost:3000",
+    "https://<domain-app-cua-ban>" // thêm domain app thật nếu có
+  ],
+  credentials: true
+}));
+
+// Healthcheck đơn giản (Render dùng được)
+app.get("/", (_req, res) => {
+  res.send("PeerJS signaling server is running.");
 });
 
-// Health route
-app.get('/', (req,res)=> res.send('Socket.IO relay is alive'));
+// Tạo HTTP server + gắn Peer server
+const httpServer = createServer(app);
 
-io.on('connection', (socket)=>{
-  // client gọi join-room
-  socket.on('join-room', ({ room, role }, ack)=>{
-    if (room) socket.join(room);
-    // báo cho cả phòng là đã có người vào
-    io.to(room).emit('room-joined', { room, who: role || 'guest' });
-    if (typeof ack === 'function') ack({ ok: true });
-  });
-
-  // guest intent -> relay cho host (và cả phòng cho đơn giản)
-  socket.on('client-message', ({ room, type, payload })=>{
-    if (!room) return;
-    io.to(room).emit('client-message', { room, type, payload });
-  });
-
-  // host broadcast state authoritative
-  socket.on('host-broadcast', ({ room, state })=>{
-    if (!room) return;
-    io.to(room).emit('host-broadcast', { room, state });
-  });
+// Quan trọng: proxied:true để Render (reverse proxy) báo đúng scheme wss
+const peerServer = ExpressPeerServer(httpServer, {
+  path: "/",
+  proxied: true,
+  // default pingInterval/pingTimeout ổn; có thể chỉnh nếu cần:
+  // pingInterval: 25000,
+  // pingTimeout: 5000
 });
 
-const PORT = process.env.PORT || 3000;
-server.listen(PORT, ()=> console.log('Socket.IO relay listening on', PORT));
+// Mount peer server ở đường dẫn cố định (ví dụ /pg)
+app.use(PEER_PATH, peerServer);
+
+// Log sự kiện hữu ích khi debug
+peerServer.on("connection", (client) => {
+  console.log("Peer connected:", client.getId());
+});
+peerServer.on("disconnect", (client) => {
+  console.log("Peer disconnected:", client.getId());
+});
+
+httpServer.listen(PORT, () => {
+  console.log(`PeerJS server on Render listening at :${PORT}${PEER_PATH}`);
+});
